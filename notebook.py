@@ -66,7 +66,7 @@ def _(db_path):
 @app.cell
 def _(emails, recipients, sqlite_engine):
     _df = mo.sql(
-        f"""
+        """
         SELECT
             e.message_id,
             e.subject,
