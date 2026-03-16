@@ -1,0 +1,22 @@
+[project]
+name = "scaling-ai-systems"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "marimo[recommended]>=0.20.4",
+    "langchain>=1.2.12", # TODO: langchain-core?
+    "langchain-openai>=1.1.11",
+    "datasets>=4.7.0",
+    "sqlalchemy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyzmq>=27.1.0",
+    "ty>=0.0.23",
+]
+
+[tool.ty.environment]
+python = ".venv" # TODO: shouldn't be required
