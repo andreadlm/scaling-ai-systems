@@ -226,14 +226,3 @@ def read_email(message_id: str) -> Optional[Email]:
     )
 
     return email_obj
-
-@tool
-def return_final_answer(answer: str, sources: list[str]) -> dict:
-    """Returns the final answer to the user's question, and the list of message IDs
-    that supported the answer.
-
-    Args:
-        answer: The final answer to return to the user.
-        sources: The list of message IDs that supported the answer.
-    """
-    pass
