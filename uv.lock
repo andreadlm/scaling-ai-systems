@@ -2064,6 +2064,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "pyzmq" },
+    { name = "ruff" },
     { name = "ty" },
 ]
 
@@ -2079,6 +2080,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pyzmq", specifier = ">=27.1.0" },
+    { name = "ruff", specifier = ">=0.15.6" },
     { name = "ty", specifier = ">=0.0.23" },
 ]
 

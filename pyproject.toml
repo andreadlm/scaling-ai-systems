@@ -15,6 +15,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pyzmq>=27.1.0",
+    "ruff>=0.15.6",
     "ty>=0.0.23",
 ]
 
