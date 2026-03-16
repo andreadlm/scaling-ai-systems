@@ -11,3 +11,6 @@ wheels/
 
 # Datasets
 data/*.db
+
+# Marimo specific
+__marimo__
