@@ -5,6 +5,10 @@ app = marimo.App(width="medium", app_title="Scaling AI systems")
 
 with app.setup:
     import marimo as mo
+    import sqlalchemy
+
+    from data.local_db import generate_database, DEFAULT_DB_PATH as db_path
+    from agent.tools import search_emails, read_email
 
 
 @app.cell(hide_code=True)
@@ -44,21 +48,13 @@ def _():
 
 @app.cell
 def _():
-    from data.local_db import generate_database, DEFAULT_DB_PATH as db_path
-
-    return db_path, generate_database
-
-
-@app.cell
-def _(generate_database):
     with mo.status.spinner(title="Preparing Enron email database…"):
         generate_database()
     return
 
 
 @app.cell
-def _(db_path):
-    import sqlalchemy
+def _():
     sqlite_engine = sqlalchemy.create_engine(f"sqlite:///{db_path}")
     return (sqlite_engine,)
 
@@ -66,7 +62,7 @@ def _(db_path):
 @app.cell
 def _(emails, recipients, sqlite_engine):
     _df = mo.sql(
-        """
+        f"""
         SELECT
             e.message_id,
             e.subject,
@@ -93,11 +89,9 @@ def _():
     The agent can call three tools. Together they define everything the agent is allowed to do:
     its full action space.
 
-    * `search_emails(keywords, sent_after, sent_before)`: runs a **full-text search** over subject
-    and body. Returns up to 10 results, each with a `message_id` and a highlighted snippet showing
-    where the keywords matched. Date filters narrow the search window and help the agent avoid reading
-    stale emails. This is the agent's primary discovery tool: it tells the agent *which* emails to look at,
-    not what they contain.
+    #### `search_emails(inbox, keywords, ...)`
+    Runs a **full-text search** over subject and body. Optional filters let the agent narrow
+    results by sender, recipient, or date range.
     """)
     return
 
@@ -108,25 +102,57 @@ def _():
         mo.md("""
         **`Test search_emails`**
 
-        {search_keywords} {search_sent_after} {search_sent_before}
+        {search_inbox} {search_keywords}
+
+        {search_from_addr} {search_to_addr}
+
+        {search_sent_after} {search_sent_before}
         """)
         .batch(
-            search_keywords=mo.ui.text(placeholder="budget forecast", label="Keywords"),
-            search_sent_after=mo.ui.text(placeholder="2000-01-01", label="Sent after"),
-            search_sent_before=mo.ui.text(placeholder="2002-12-31", label="Sent before")
+            search_inbox=mo.ui.text(placeholder="user@enron.com", label="Inbox (required)"),
+            search_keywords=mo.ui.text(placeholder="budget forecast", label="Keywords (space-separated, required)"),
+            search_from_addr=mo.ui.text(placeholder="sender@enron.com", label="From (optional)"),
+            search_to_addr=mo.ui.text(placeholder="recipient@enron.com", label="To (optional)"),
+            search_sent_after=mo.ui.text(placeholder="2000-01-01", label="Sent after (optional)"),
+            search_sent_before=mo.ui.text(placeholder="2002-12-31", label="Sent before (optional)"),
         )
         .form(show_clear_button=True, bordered=True)
     )
     search_emails_form
+    return (search_emails_form,)
+
+
+@app.cell(hide_code=True)
+def _(search_emails_form):
+    mo.stop(
+        search_emails_form.value is None,
+        mo.md("_Submit the form to see results._"),
+    )
+
+    _v = search_emails_form.value
+
+    _results = search_emails.invoke({
+        "inbox": _v["search_inbox"],
+        "keywords": _v["search_keywords"].split() if _v["search_keywords"] else [],
+        "from_addr": _v["search_from_addr"] or None,
+        "to_addr": _v["search_to_addr"] or None,
+        "sent_after": _v["search_sent_after"] or None,
+        "sent_before": _v["search_sent_before"] or None,
+    })
+
+    mo.ui.table(
+        [{"message_id": r.message_id, "snippet": mo.Html(r.snippet)} for r in _results],
+        label=f"{len(_results)} result(s)",
+    )
     return
 
 
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    * `read_email(message_id)`: fetches the **complete body** of a single email by its
-    `message_id`. The agent calls this after `search_emails` to read the full content of
-    a promising result.
+    #### `read_email(message_id)`
+    Fetches the **complete body** of a single email by its `message_id`. The agent calls this
+    after `search_emails` to read the full content of a promising result.
     """)
     return
 
@@ -145,6 +171,33 @@ def _():
         .form(show_clear_button=True, bordered=True)
     )
     read_email_form
+    return (read_email_form,)
+
+
+@app.cell(hide_code=True)
+def _(read_email_form):
+    mo.stop(
+        read_email_form.value is None,
+        mo.md("_Submit the form to see results._"),
+    )
+
+    _email = read_email.invoke({"message_id": read_email_form.value["message_id"]})
+
+    mo.stop(
+        _email is None,
+        mo.md("_No email found_"),
+    )
+
+    mo.vstack([
+        mo.md(f"**Subject:** {_email.subject or '(no subject)'}"),
+        mo.md(f"**From:** {_email.from_address or '(unknown)'}"),
+        mo.md(f"**Date:** {_email.date}"),
+        mo.md(f"**To:** {', '.join(_email.to_addresses) or '(none)'}"),
+        mo.md(f"**CC:** {', '.join(_email.cc_addresses) or '(none)'}"),
+        mo.md(f"**BCC:** {', '.join(_email.bcc_addresses) or '(none)'}"),
+        mo.md("---"),
+        mo.md(_email.body or '(no body)'),
+    ])
     return
 
 
