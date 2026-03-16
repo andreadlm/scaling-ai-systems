@@ -1,13 +1,16 @@
 import marimo
 
 __generated_with = "0.20.4"
-app = marimo.App(width="medium", app_title="Scaling AI systems")
+app = marimo.App(
+    width="medium",
+    app_title="Scaling AI systems",
+)
 
 with app.setup:
     import marimo as mo
-    import sqlalchemy
+    from langchain.agents import create_agent
 
-    from data.local_db import generate_database, DEFAULT_DB_PATH as db_path
+    from data.local_db import generate_database, sqlite_engine
     from agent.tools import search_emails, read_email
 
 
@@ -54,13 +57,7 @@ def _():
 
 
 @app.cell
-def _():
-    sqlite_engine = sqlalchemy.create_engine(f"sqlite:///{db_path}")
-    return (sqlite_engine,)
-
-
-@app.cell
-def _(emails, recipients, sqlite_engine):
+def _(emails, recipients):
     _df = mo.sql(
         f"""
         SELECT
@@ -89,7 +86,7 @@ def _():
     The agent can call three tools. Together they define everything the agent is allowed to do:
     its full action space.
 
-    #### `search_emails(inbox, keywords, ...)`
+    ### `search_emails(inbox, keywords, ...)`
     Runs a **full-text search** over subject and body. Optional filters let the agent narrow
     results by sender, recipient, or date range.
     """)
@@ -150,7 +147,7 @@ def _(search_emails_form):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    #### `read_email(message_id)`
+    ### `read_email(message_id)`
     Fetches the **complete body** of a single email by its `message_id`. The agent calls this
     after `search_emails` to read the full content of a promising result.
     """)
@@ -204,10 +201,32 @@ def _(read_email_form):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    * `return_final_answer(answer, sources)`: terminates the loop. The agent calls this when
-    it has enough information to answer the user's question, passing both the answer text and
-    the list of `message_id`s that support it. Once called, the agent stops.
+    ## 2 · Agent Definition
+
+    With the environment in place, we can define the **agent**. It is built with LangChain's `create_agent` and is given the two
+    email tools as its action space and a simple system prompt.
     """)
+    return
+
+
+@app.cell
+def _(model):
+    agent = create_agent(
+        "openai:gpt-4o-mini",
+        tools=[
+            search_emails, 
+            read_email
+        ],
+        system_prompt=r"""
+            You are an email search agent. You are given a user query and a list of tools you can use to search the user's email. 
+            Use the tools to search the user's emails and find the answer to the user's query. You may take up to 
+            ... turns to find the answer, so if your first seach doesn't find the answer, you can try with 
+            different keywords.
+
+            User's email address is ... .
+            Today's date is ... .
+        """,
+    )
     return
 
 

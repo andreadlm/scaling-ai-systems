@@ -1,9 +1,12 @@
-import sqlite3
 import os
 import logging
-from datasets import load_dataset, Dataset, Features, Value, Sequence
 from tqdm import tqdm
 from datetime import datetime
+
+import sqlite3
+import sqlalchemy
+from datasets import load_dataset, Dataset, Features, Value, Sequence
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_PATH = os.path.join(BASE_DIR, "enron_emails.db")
@@ -13,6 +16,8 @@ DEFAULT_REPO_ID = "corbt/enron-emails"
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+sqlite_engine = sqlalchemy.create_engine(f"sqlite:///{BASE_DIR}")
 
 
 SQL_CREATE_TABLES = """
