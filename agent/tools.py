@@ -29,6 +29,7 @@ class SearchResult:
     message_id: str
     snippet: str
 
+
 @tool
 def search_emails(
     inbox: str,

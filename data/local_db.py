@@ -17,7 +17,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-sqlite_engine = sqlalchemy.create_engine(f"sqlite:///{BASE_DIR}")
+sqlite_engine = sqlalchemy.create_engine(f"sqlite:///{DEFAULT_DB_PATH}")
 
 
 SQL_CREATE_TABLES = """
