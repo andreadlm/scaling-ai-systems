@@ -1,14 +1,15 @@
 import marimo
 
 __generated_with = "0.20.4"
-app = marimo.App(
-    width="medium",
-    app_title="Scaling AI systems",
-)
+app = marimo.App(width="medium", app_title="Scaling AI systems")
 
 with app.setup:
     import marimo as mo
+    import datetime
+    from dataclasses import dataclass
     from langchain.agents import create_agent
+    from langchain.agents.middleware import dynamic_prompt, ModelRequest
+    from langchain_openai import ChatOpenAI
 
     from data.local_db import generate_database, sqlite_engine
     from agent.tools import search_emails, read_email
@@ -180,11 +181,6 @@ def _(read_email_form):
 
     _email = read_email.invoke({"message_id": read_email_form.value["message_id"]})
 
-    mo.stop(
-        _email is None,
-        mo.md("_No email found_"),
-    )
-
     mo.vstack([
         mo.md(f"**Subject:** {_email.subject or '(no subject)'}"),
         mo.md(f"**From:** {_email.from_address or '(unknown)'}"),
@@ -210,23 +206,98 @@ def _():
 
 
 @app.cell
-def _(model):
-    agent = create_agent(
-        "openai:gpt-4o-mini",
-        tools=[
-            search_emails, 
-            read_email
-        ],
-        system_prompt=r"""
-            You are an email search agent. You are given a user query and a list of tools you can use to search the user's email. 
-            Use the tools to search the user's emails and find the answer to the user's query. You may take up to 
-            ... turns to find the answer, so if your first seach doesn't find the answer, you can try with 
-            different keywords.
+def _():
+    @dataclass
+    class Context:
+        inbox: str
+        date: str
 
-            User's email address is ... .
-            Today's date is ... .
-        """,
+    model = ChatOpenAI(
+        model="gpt-5-mini",
+        base_url="http://localhost:4141/v1",
+        api_key="",
     )
+
+    @dynamic_prompt
+    def build_prompt(request: ModelRequest[Context]) -> str:
+        return f"""
+            You are an email search agent. You are given a user query and a list of tools
+            you can use to search the user's email.
+            Use the tools to search the user's emails and find the answer to the user's query.
+            You may take multiple turns to find the answer — if your first search doesn't find
+            the answer, try with different keywords.
+
+            User's email address is {request.runtime.context.inbox}.
+            Today's date is {request.runtime.context.date}.
+        """
+
+    agent = create_agent(
+        model,
+        tools=[search_emails, read_email],
+        middleware=[build_prompt],
+        context_schema=Context,
+    ).with_config(
+        {"recursion_limit": 10}
+    )
+    return Context, agent
+
+
+@app.cell(hide_code=True)
+def _():
+    agent_form = (
+        mo.md("""
+        **Ask the agent**
+
+        {question}
+
+        {inbox} {date}
+        """)
+        .batch(
+            question=mo.ui.text(
+                placeholder="e.g. What are the latest emails about the budget?",
+                label="Question",
+                full_width=True,
+            ),
+            inbox=mo.ui.text(
+                placeholder="user@enron.com",
+                label="Inbox (your email address)",
+            ),
+            date=mo.ui.date(
+                value=datetime.date.today(),
+                label="Date",
+            ),
+        )
+        .form(show_clear_button=True, bordered=True)
+    )
+    agent_form
+    return (agent_form,)
+
+
+@app.cell(hide_code=True)
+def _(Context, agent, agent_form):
+    mo.stop(
+        agent_form.value is None,
+        mo.md("_Submit the form to ask the agent a question._"),
+    )
+
+    _v = agent_form.value
+
+    with mo.status.spinner(title="Agent is thinking…"):
+        _result = agent.invoke(
+            {"messages": [("user", _v["question"])]},
+            context=Context(
+                inbox=_v["inbox"], 
+                date=str(_v["date"])
+            ),
+        )
+
+    _answer = _result["messages"][-1].content
+
+    mo.vstack([
+        mo.md(f"**Question:** {_v['question']}"),
+        mo.md("---"),
+        mo.md(_answer),
+    ])
     return
 
 
