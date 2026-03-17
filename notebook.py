@@ -254,16 +254,16 @@ def _():
         """)
         .batch(
             question=mo.ui.text(
-                placeholder="e.g. What are the latest emails about the budget?",
+                placeholder="When is Shari's move to Portland targeted for?",
                 label="Question",
                 full_width=True,
             ),
             inbox=mo.ui.text(
-                placeholder="user@enron.com",
+                value="tim.belden@enron.com",
                 label="Inbox (your email address)",
             ),
             date=mo.ui.date(
-                value=datetime.date.today(),
+                value="2000-12-30",
                 label="Date",
             ),
         )
