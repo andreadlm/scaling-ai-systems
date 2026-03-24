@@ -5,6 +5,7 @@ app = marimo.App(width="medium", app_title="Scaling AI systems")
 
 with app.setup:
     import os
+    import subprocess
     from dataclasses import dataclass
 
     import marimo as mo
@@ -349,7 +350,33 @@ def _():
 
     The quickest way to get started is via ::logos:docker-icon:: Docker Compose — see the
     [self-hosting guide](https://langfuse.com/self-hosting/deployment/docker-compose).
+    """)
+    return
 
+
+@app.cell(hide_code=True)
+def _():
+    with mo.status.spinner(title="Starting Langfuse…"):
+        subprocess.run(
+            ["docker", "compose", "up", "-d", "langfuse-web"],
+            check=True,
+        )
+    _user = os.environ.get("LANGFUSE_INIT_USER_EMAIL", "")
+    _password = os.environ.get("LANGFUSE_INIT_USER_PASSWORD", "")
+    mo.callout(
+        mo.md(
+            f"Langfuse is starting → open [http://localhost:3000](http://localhost:3000) to verify."
+            f"\n\n**Username:** `{_user}`"
+            f"\n**Password:** `{_password}`"
+        ),
+        kind="success",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
     ### Tracing an agent invocation
 
     Integrating Langfuse into a LangChain agent requires a single change: pass a
@@ -415,6 +442,7 @@ def _(ask_agent_traced, traced_agent_form):
 
     _v = traced_agent_form.value
     _host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+    _project_id = os.environ.get("LANGFUSE_INIT_PROJECT_ID", "")
 
     with mo.status.spinner(title="Agent is thinking…"):
         _answer = ask_agent_traced(
@@ -428,7 +456,7 @@ def _(ask_agent_traced, traced_agent_form):
         mo.md("---"),
         mo.md(_answer),
         mo.callout(
-            mo.md(f"Trace recorded → open the [Langfuse UI]({_host}) to inspect it."),
+            mo.md(f"Trace recorded → open the [Langfuse UI]({_host}/project/{_project_id}/traces) to inspect it."),
             kind="info",
         ),
     ])
