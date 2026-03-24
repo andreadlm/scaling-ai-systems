@@ -4,15 +4,20 @@ __generated_with = "0.20.4"
 app = marimo.App(width="medium", app_title="Scaling AI systems")
 
 with app.setup:
-    import marimo as mo
-    import datetime
+    import os
     from dataclasses import dataclass
+
+    import marimo as mo
+    from dotenv import load_dotenv
     from langchain.agents import create_agent
     from langchain.agents.middleware import dynamic_prompt, ModelRequest
     from langchain_openai import ChatOpenAI
+    from langfuse.langchain import CallbackHandler
 
     from data.local_db import generate_database, sqlite_engine
     from agent.tools import search_emails, read_email
+
+    load_dotenv()
 
 
 @app.cell(hide_code=True)
@@ -57,6 +62,14 @@ def _():
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Let's preview the data — here are the 100 most recent emails with their recipients:
+    """)
+    return
+
+
 @app.cell
 def _(emails, recipients):
     _df = mo.sql(
@@ -86,6 +99,8 @@ def _():
     mo.md(r"""
     The agent can call three tools. Together they define everything the agent is allowed to do:
     its full action space.
+
+    Let's test each tool interactively before wiring them into the agent.
 
     ### `search_emails(inbox, keywords, ...)`
     Runs a **full-text search** over subject and body. Optional filters let the agent narrow
@@ -214,10 +229,14 @@ def _():
 
     model = ChatOpenAI(
         model="gpt-5-mini",
-        base_url="http://localhost:4141/v1",
-        api_key="",
+        base_url=os.environ.get("OPENAI_BASE_URL", ""),
+        api_key=os.environ.get("OPENAI_API_KEY", ""),
     )
+    return Context, model
 
+
+@app.cell
+def _(Context, model):
     @dynamic_prompt
     def build_prompt(request: ModelRequest[Context]) -> str:
         return f"""
@@ -239,7 +258,19 @@ def _():
     ).with_config(
         {"recursion_limit": 10}
     )
-    return Context, agent
+    return (agent,)
+
+
+@app.cell
+def _(Context, agent):
+    def ask_agent(question: str, inbox: str, date: str) -> str:
+        result = agent.invoke(
+            {"messages": [("user", question)]},
+            context=Context(inbox=inbox, date=date),
+        )
+        return result["messages"][-1].content
+
+    return (ask_agent,)
 
 
 @app.cell(hide_code=True)
@@ -274,7 +305,7 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(Context, agent, agent_form):
+def _(agent_form, ask_agent):
     mo.stop(
         agent_form.value is None,
         mo.md("_Submit the form to ask the agent a question._"),
@@ -283,20 +314,123 @@ def _(Context, agent, agent_form):
     _v = agent_form.value
 
     with mo.status.spinner(title="Agent is thinking…"):
-        _result = agent.invoke(
-            {"messages": [("user", _v["question"])]},
-            context=Context(
-                inbox=_v["inbox"], 
-                date=str(_v["date"])
-            ),
+        _answer = ask_agent(
+            question=_v["question"],
+            inbox=_v["inbox"],
+            date=str(_v["date"]),
         )
-
-    _answer = _result["messages"][-1].content
 
     mo.vstack([
         mo.md(f"**Question:** {_v['question']}"),
         mo.md("---"),
         mo.md(_answer),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ## 3 · Observability
+
+    When an agent runs, it operates autonomously: it decides which tools to call, in what
+    order, and with which arguments. This opacity makes it hard to understand *why* the agent
+    produced a particular answer, catch errors, or track latency and token cost — all of which
+    become critical concerns as you scale from a prototype to a production system.
+
+    An **observability platform** instruments every step of the agent's execution and records
+    it as a structured **trace**: every LLM call, every tool invocation, every message
+    exchanged, with timing and token counts attached. You can then drill into these traces to
+    debug surprising answers, measure reasoning depth, and spot regressions across runs.
+
+    [Langfuse](https://langfuse.com) is an open-source LLM observability platform with native
+    LangChain integration. It captures full execution traces with latency breakdowns, token
+    usage, and structured inputs/outputs at every level of the agent's reasoning loop.
+
+    The quickest way to get started is via ::logos:docker-icon:: Docker Compose — see the
+    [self-hosting guide](https://langfuse.com/self-hosting/deployment/docker-compose).
+
+    ### Tracing an agent invocation
+
+    Integrating Langfuse into a LangChain agent requires a single change: pass a
+    `CallbackHandler` instance in the `config` dictionary when invoking the agent. The
+    callback intercepts every internal event — LLM calls, tool calls, chain starts and ends
+    — and streams them to Langfuse in real time, without any changes to the agent itself.
+    """)
+    return
+
+
+@app.cell
+def _(Context, agent):
+    langfuse_handler = CallbackHandler()
+
+    def ask_agent_traced(question: str, inbox: str, date: str) -> str:
+        result = agent.invoke(
+            {"messages": [("user", question)]},
+            config={"callbacks": [langfuse_handler]},
+            context=Context(inbox=inbox, date=date),
+        )
+        return result["messages"][-1].content
+
+    return (ask_agent_traced,)
+
+
+@app.cell(hide_code=True)
+def _():
+    traced_agent_form = (
+        mo.md("""
+        **Ask the agent (traced)**
+
+        {question}
+
+        {inbox} {date}
+        """)
+        .batch(
+            question=mo.ui.text(
+                placeholder="When is Shari's move to Portland targeted for?",
+                label="Question",
+                full_width=True,
+            ),
+            inbox=mo.ui.text(
+                value="tim.belden@enron.com",
+                label="Inbox (your email address)",
+            ),
+            date=mo.ui.date(
+                value="2000-12-30",
+                label="Date",
+            ),
+        )
+        .form(show_clear_button=True, bordered=True)
+    )
+    traced_agent_form
+    return (traced_agent_form,)
+
+
+@app.cell(hide_code=True)
+def _(ask_agent_traced, traced_agent_form):
+    mo.stop(
+        traced_agent_form.value is None,
+        mo.md("_Submit the form to ask the agent a question._"),
+    )
+
+    _v = traced_agent_form.value
+    _host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+
+    with mo.status.spinner(title="Agent is thinking…"):
+        _answer = ask_agent_traced(
+            question=_v["question"],
+            inbox=_v["inbox"],
+            date=str(_v["date"]),
+        )
+
+    mo.vstack([
+        mo.md(f"**Question:** {_v['question']}"),
+        mo.md("---"),
+        mo.md(_answer),
+        mo.callout(
+            mo.md(f"Trace recorded → open the [Langfuse UI]({_host}) to inspect it."),
+            kind="info",
+        ),
     ])
     return
 

@@ -14,3 +14,6 @@ data/*.db
 
 # Marimo specific
 __marimo__
+
+# Environment variables
+.env
