@@ -19,7 +19,10 @@ def load_synthetic_queries(
     shuffle: bool = False,
     exclude_known_bad_queries: bool = True,
 ) -> List[SyntheticQuery]:
-    dataset: Dataset = load_dataset(HF_REPO_ID, split=split)
+    dataset = load_dataset(HF_REPO_ID, split=split)
+    
+    if not isinstance(dataset, Dataset):
+        raise ValueError(f"Expected a Hugging Face Dataset, but got {type(dataset)}")
 
     if max_messages is not None:
         dataset = dataset.filter(lambda x: len(x["message_ids"]) <= max_messages)
