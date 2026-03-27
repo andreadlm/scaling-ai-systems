@@ -1,22 +1,25 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.21.1"
 app = marimo.App(width="medium", app_title="Scaling AI systems")
 
 with app.setup:
+    import json
     import os
     import subprocess
-    from dataclasses import dataclass
+    from dataclasses import asdict, dataclass
 
     import marimo as mo
     from dotenv import load_dotenv
     from langchain.agents import create_agent
     from langchain.agents.middleware import dynamic_prompt, ModelRequest
+    from langchain_core.messages import AIMessage, ToolMessage
     from langchain_openai import ChatOpenAI
     from langfuse.langchain import CallbackHandler
 
-    from data.local_db import generate_database, sqlite_engine
     from agent.tools import search_emails, read_email
+    from data.local_db import generate_database, sqlite_engine
+    from data.query_iterators import load_synthetic_queries
 
     load_dotenv()
 
@@ -256,8 +259,6 @@ def _(Context, model):
         tools=[search_emails, read_email],
         middleware=[build_prompt],
         context_schema=Context,
-    ).with_config(
-        {"recursion_limit": 10}
     )
     return (agent,)
 
@@ -458,6 +459,276 @@ def _(ask_agent_traced, traced_agent_form):
         mo.callout(
             mo.md(f"Trace recorded → open the [Langfuse UI]({_host}/project/{_project_id}/traces) to inspect it."),
             kind="info",
+        ),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ## 4 · Reinforcement Learning
+
+    So far we have an agent that *works*, and an observability layer that lets us *see* what
+    it does. But how do we make the agent **better**?
+
+    **Reinforcement Learning (RL)** treats the problem as a loop:
+
+    | RL concept | Our agent |
+    |---|---|
+    | **Policy** | The LLM that decides which tool to call and what answer to give |
+    | **Environment** | The email database + the two tools (`search_emails`, `read_email`) |
+    | **Trajectory** | One complete agent run: the full sequence of messages from user question to final answer |
+    | **Reward** | A numeric score telling the policy how well it did on that trajectory |
+
+    The RL training loop is simple in principle: run the policy many times, score each
+    trajectory, and update the policy weights to make high-reward trajectories more likely.
+
+    The critical piece is the **reward function** — it must capture not just whether the
+    final answer is correct, but also whether the agent *behaved well* along the way.
+
+    ### Reward shaping with a rubric
+
+    A naive reward — `+1` if correct, `0` otherwise — gives the model very little signal to
+    learn from. Instead we use a **rubric**: a structured scorecard that tracks intermediate
+    signals during the trajectory and feeds them into a shaped reward.
+
+    **Rubric fields:**
+
+    | Field | Type | What it tracks |
+    |---|---|---|
+    | `answer_correct` | bool | Whether the final answer matches the ground truth (evaluated by an LLM-as-judge) |
+    | `ever_found_right_email` | bool | Whether `search_emails` ever returned the target email among its results |
+    | `ever_read_right_email` | bool | Whether the agent called `read_email` with the correct `message_id` |
+    | `num_turns` | int | Total number of LLM calls in the trajectory |
+    | `num_tool_calls` | int | Total number of tool invocations |
+    | `error` | bool | Whether the agent raised an unhandled exception |
+
+    **Reward tiers** — the reward has three base levels, with additive partial bonuses
+    (+0.1 each) for process signals that indicate good intermediate behaviour:
+
+    | Outcome | Base | Partial bonuses | Range |
+    |---|---|---|---|
+    | **Correct answer** | +1.0 | +0.1 found · +0.1 read · +0.1 efficiency | [1.0, 1.3] |
+    | **Wrong answer** | −1.0 | +0.1 found · +0.1 read | [−1.0, −0.8] |
+    | **No answer / error** | 0.0 | +0.1 found · +0.1 read | [0.0, 0.2] |
+
+    The efficiency bonus rewards trajectories that solve the task in fewer turns, nudging
+    the policy toward concise, targeted searches.
+    """)
+    return
+
+
+@app.cell
+def _():
+    @dataclass
+    class Rubric:
+        answer_correct: bool = False
+        ever_found_right_email: bool = False
+        ever_read_right_email: bool = False
+        num_turns: int = 0
+        num_tool_calls: int = 0
+        error: bool = False
+
+        def to_dict(self) -> dict:
+            return asdict(self)
+
+    def calculate_reward(rubric: Rubric, max_turns: int) -> float:
+        partial = 0.0
+        partial += 0.1 if rubric.ever_found_right_email else 0  # agent found the needle
+        partial += 0.1 if rubric.ever_read_right_email else 0   # agent read the needle
+
+        if rubric.error:
+            return 0.0 + partial
+
+        if rubric.answer_correct:
+            efficiency = 0.1 * (1 - rubric.num_turns / max_turns) if max_turns > 0 else 0
+            return 1.0 + partial + efficiency
+
+        return -1.0 + partial
+
+    def judge_answer_correctness(question: str, answer: str, ground_truth: str, model) -> bool:
+        response = model.invoke([
+            {
+                "role": "system",
+                "content": (
+                    "You will be given a question and two different answers: the correct answer "
+                    "and the answer given by an AI. Determine if the AI answer is correct. "
+                    "Return only the word True or False, no other text."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n"
+                    f"Correct answer: {ground_truth}\n"
+                    f"AI answer: {answer}"
+                ),
+            },
+        ])
+        return response.content.strip().lower().startswith("t")
+
+    return Rubric, calculate_reward, judge_answer_correctness
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Evaluation dataset
+
+    To compute rewards we need questions with known answers. The
+    [`corbt/enron_emails_sample_questions`](https://huggingface.co/datasets/corbt/enron_emails_sample_questions)
+    dataset on Hugging Face ::logos:hugging-face-icon:: provides synthetic queries over the Enron corpus, each paired
+    with a ground-truth answer and the `message_id`(s) of the relevant email(s).
+
+    Each `SyntheticQuery` carries its own `inbox_address` and `query_date`, so the agent's
+    context is set automatically for each evaluation run.
+    """)
+    return
+
+
+@app.cell
+def _():
+    with mo.status.spinner(title="Loading evaluation queries…"):
+        eval_queries = load_synthetic_queries(split="test", limit=20)
+    return (eval_queries,)
+
+
+@app.cell(hide_code=True)
+def _(eval_queries):
+    mo.ui.table(
+        [
+            {
+                "id": q.id,
+                "inbox": q.inbox_address,
+                "question": q.question,
+                "answer": q.answer,
+                "message_ids": ", ".join(q.message_ids),
+            }
+            for q in eval_queries
+        ],
+        label=f"{len(eval_queries)} evaluation queries",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Running a rollout
+
+    A **rollout** is a single scored execution of the agent on a query: invoke the agent,
+    walk the message history to populate the rubric, and compute the shaped reward.
+    """)
+    return
+
+
+@app.cell
+def _(
+    Context,
+    Rubric,
+    agent,
+    calculate_reward,
+    judge_answer_correctness,
+    model,
+):
+    def rollout(query, max_turns=10):
+        rubric = Rubric()
+
+        try:
+            result = agent.invoke(
+                {"messages": [("user", query.question)]},
+                context=Context(inbox=query.inbox_address, date=query.query_date),
+            )
+            messages = result["messages"]
+        except Exception:
+            rubric.error = True
+            return rubric, calculate_reward(rubric, max_turns), []
+
+        correct_ids = set(query.message_ids)
+
+        for msg in messages:
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    rubric.num_tool_calls += 1
+                    if tc["name"] == "read_email":
+                        if tc["args"].get("message_id", "") in correct_ids:
+                            rubric.ever_read_right_email = True
+            elif isinstance(msg, ToolMessage) and msg.name == "search_emails":
+                try:
+                    results = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                    if isinstance(results, list):
+                        for r in results:
+                            if isinstance(r, dict) and r.get("message_id") in correct_ids:
+                                rubric.ever_found_right_email = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        rubric.num_turns = sum(1 for m in messages if isinstance(m, AIMessage))
+
+        final_ai = [m for m in messages if isinstance(m, AIMessage) and not m.tool_calls]
+        if final_ai:
+            rubric.answer_correct = judge_answer_correctness(
+                query.question, final_ai[-1].content, query.answer, model
+            )
+        else:
+            # No textual answer means the agent ended with a tool call — treat as error.
+            rubric.error = True
+
+        return rubric, calculate_reward(rubric, max_turns), messages
+
+    return (rollout,)
+
+
+@app.cell(hide_code=True)
+def _(eval_queries):
+    _query_options = {f"[{q.id}] {q.question[:80]}": i for i, q in enumerate(eval_queries)}
+
+    rollout_form = (
+        mo.md("""
+        **Run a rollout**
+
+        {query_selector}
+        """)
+        .batch(
+            query_selector=mo.ui.dropdown(
+                options=_query_options,
+                label="Query",
+                full_width=True,
+            ),
+        )
+        .form(show_clear_button=True, bordered=True)
+    )
+    rollout_form
+    return (rollout_form,)
+
+
+@app.cell(hide_code=True)
+def _(eval_queries, rollout, rollout_form):
+    mo.stop(
+        rollout_form.value is None or rollout_form.value["query_selector"] is None,
+        mo.md("_Select a query and submit to run a rollout._"),
+    )
+
+    _idx = rollout_form.value["query_selector"]
+    _query = eval_queries[_idx]
+
+    with mo.status.spinner(title="Running rollout…"):
+        _rubric, _reward, _messages = rollout(_query)
+
+    mo.vstack([
+        mo.md(f"**Question:** {_query.question}"),
+        mo.md(f"**Ground truth:** {_query.answer}"),
+        mo.md(f"**Agent answer:** {_messages[-1].content if _messages else '(no answer)'}"),
+        mo.md("---"),
+        mo.md("#### Rubric"),
+        mo.ui.table(
+            [{"signal": k, "value": v} for k, v in _rubric.to_dict().items()],
+            label="Rubric breakdown",
+        ),
+        mo.callout(
+            mo.md(f"**Reward: `{_reward:.2f}`**"),
+            kind="success" if _reward >= 1.0 else ("warn" if _reward >= 0 else "danger"),
         ),
     ])
     return

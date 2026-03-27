@@ -1,6 +1,15 @@
 from pydantic import BaseModel
 from typing import List, Optional
 
+class SyntheticQuery(BaseModel):
+    id: int
+    question: str
+    answer: str
+    message_ids: List[str]  # message_ids (strings) of referenced emails
+    how_realistic: float
+    inbox_address: str
+    query_date: str
+
 class Email(BaseModel):
     message_id: str
     date: str  # ISO 8601 string 'YYYY-MM-DD HH:MM:SS'
