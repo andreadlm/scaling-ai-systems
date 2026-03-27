@@ -8,6 +8,7 @@ with app.setup:
     import os
     import subprocess
     from dataclasses import asdict, dataclass
+    import asyncio
 
     import marimo as mo
     from dotenv import load_dotenv
@@ -16,9 +17,13 @@ with app.setup:
     from langchain_core.messages import AIMessage, ToolMessage
     from langchain_openai import ChatOpenAI
     from langfuse.langchain import CallbackHandler
+    import art
+    from art.langgraph import init_chat_model
+    from art.local import LocalBackend
 
     from agent.tools import search_emails, read_email
     from data.local_db import generate_database, sqlite_engine
+    from data.types import SyntheticQuery
     from data.query_iterators import load_synthetic_queries
 
     load_dotenv()
@@ -29,12 +34,24 @@ def _():
     mo.md(r"""
     # Scaling AI Systems: email research agent
 
-    The goal of this project is to build an **agent** that can answer natural-language questions
-    by autonomously searching through an email inbox.
+    This project walks through the full lifecycle of building and improving an **LLM-powered agent**
+    that answers natural-language questions by autonomously searching an email inbox.
 
     Rather than retrieving a single document, the agent must reason about which emails are
-    relevant, decide what to read, and synthesise a final answer, all within a constrained
-    tool-use loop.
+    relevant, decide what to read, and synthesise a final answer — all within a constrained
+    tool-use loop. We will build it from scratch, instrument it for observability, and then
+    train it to get better using reinforcement learning.
+
+    The notebook is structured around three progressive steps:
+
+    1. **Agent** — define the environment (a real email corpus), give the agent tools to interact
+       with it, and wire everything together into a working LangChain agent.
+    2. **Observability** — instrument every agent run with [Langfuse](https://langfuse.com) to
+       capture full execution traces. Visibility into agent behaviour is a prerequisite for
+       systematic improvement.
+    3. **Training** — score each run with a shaped reward rubric and feed those scores back to
+       the model via [OpenPipe ART](https://art.openpipe.ai) reinforcement learning, closing the
+       loop from a working prototype to an improving policy.
     """)
     return
 
@@ -42,19 +59,18 @@ def _():
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ## 1 · Environment
+    ## 1 · Agent
 
     An agent always operates inside an **environment** — the set of tools it can call and the
-    data those tools expose. Here the environment is an email inbox.
+    data those tools expose. Before we can build anything, we need to set that environment up.
 
-    We use the [Enron email corpus](https://en.wikipedia.org/wiki/Enron_Corpus): when Enron
+    We'll use the [Enron email corpus](https://en.wikipedia.org/wiki/Enron_Corpus): when Enron
     collapsed in 2001 following a massive accounting scandal, ~500 K of its internal emails were
-    made public during litigation. This makes it one of the few large, realistic email datasets
-    available for research.
+    made public during litigation. It's one of the few large, realistic email datasets available
+    for research, which makes it perfect for our purposes.
 
-    A cleaned subset is available on Hugging Face ::logos:hugging-face-icon:: as
-    [`corbt/enron-emails`](https://huggingface.co/datasets/corbt/enron-emails). We download it
-    and load it into a local ::devicon:sqlite:: SQLite database.
+    Let's start by downloading a cleaned subset from Hugging Face and loading it into a local
+    ::devicon:sqlite:: SQLite database.
     """)
     return
 
@@ -69,7 +85,11 @@ def _():
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    Let's preview the data — here are the 100 most recent emails with their recipients:
+    ### Data
+
+    Let's preview what we're working with. Below are the 100 most recent emails in the corpus,
+    with subject, sender, recipients and body. Notice the range of topics — internal memos,
+    trading discussions, logistics — which makes this a genuinely challenging retrieval problem.
     """)
     return
 
@@ -101,14 +121,18 @@ def _(emails, recipients):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    The agent can call three tools. Together they define everything the agent is allowed to do:
-    its full action space.
+    ### Tools
 
-    Let's test each tool interactively before wiring them into the agent.
+    The agent has access to exactly two tools — everything it can do goes through these.
+    Together they define the agent's full **action space**: if a piece of information isn't
+    reachable via these two tools, the agent simply cannot find it.
 
-    ### `search_emails(inbox, keywords, ...)`
-    Runs a **full-text search** over subject and body. Optional filters let the agent narrow
-    results by sender, recipient, or date range.
+    Let's look at each tool and try them interactively.
+
+    #### `search_emails(inbox, keywords, ...)`
+    Runs a full-text search over subject and body. Optional filters let the agent narrow results
+    by sender, recipient, or date range. This is typically the agent's first move: cast a wide
+    net, then decide what to read in full.
     """)
     return
 
@@ -167,9 +191,12 @@ def _(search_emails_form):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ### `read_email(message_id)`
-    Fetches the **complete body** of a single email by its `message_id`. The agent calls this
-    after `search_emails` to read the full content of a promising result.
+    #### `read_email(message_id)`
+    Fetches the complete body of a single email by its `message_id`. The agent calls this after
+    `search_emails` to read the full content of a promising result — because search only returns
+    a short snippet, not the full text.
+
+    Let's test it with a `message_id` returned by the search above.
     """)
     return
 
@@ -216,10 +243,15 @@ def _(read_email_form):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ## 2 · Agent Definition
+    ### Agent definition
 
-    With the environment in place, we can define the **agent**. It is built with LangChain's `create_agent` and is given the two
-    email tools as its action space and a simple system prompt.
+    With the environment and tools in place, let's wire everything together into an agent.
+
+    We use LangChain's `create_agent` with a `dynamic_prompt` middleware that injects
+    runtime context — the user's inbox address and the current date — into the system prompt
+    at each invocation. This is important: without the inbox address the agent wouldn't know
+    *whose* emails to search, and without the date it couldn't reason about relative time
+    references like "last week".
     """)
     return
 
@@ -260,7 +292,7 @@ def _(Context, model):
         middleware=[build_prompt],
         context_schema=Context,
     )
-    return (agent,)
+    return agent, build_prompt
 
 
 @app.cell
@@ -273,6 +305,16 @@ def _(Context, agent):
         return result["messages"][-1].content
 
     return (ask_agent,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Let's try the agent on a free-form question. The agent will autonomously decide which tools
+    to call, in what order, and with which arguments — we just give it a question and wait for
+    an answer.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -333,24 +375,19 @@ def _(agent_form, ask_agent):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ## 3 · Observability
+    ## 2 · Observability
 
-    When an agent runs, it operates autonomously: it decides which tools to call, in what
-    order, and with which arguments. This opacity makes it hard to understand *why* the agent
-    produced a particular answer, catch errors, or track latency and token cost — all of which
-    become critical concerns as you scale from a prototype to a production system.
+    The agent works — but right now it's a black box. When it runs, it decides autonomously which
+    tools to call, in what order, and with which arguments. It's hard to understand *why* it produced
+    a particular answer, catch errors, or track latency and token cost. All of these become critical
+    as you move from a prototype to a production system.
 
-    An **observability platform** instruments every step of the agent's execution and records
-    it as a structured **trace**: every LLM call, every tool invocation, every message
-    exchanged, with timing and token counts attached. You can then drill into these traces to
-    debug surprising answers, measure reasoning depth, and spot regressions across runs.
+    What we need is an **observability platform**: a tool that instruments every step of the agent's
+    execution and records it as a structured **trace** — every LLM call, every tool invocation,
+    every message exchanged, with timing and token counts attached.
 
-    [Langfuse](https://langfuse.com) is an open-source LLM observability platform with native
-    LangChain integration. It captures full execution traces with latency breakdowns, token
-    usage, and structured inputs/outputs at every level of the agent's reasoning loop.
-
-    The quickest way to get started is via ::logos:docker-icon:: Docker Compose — see the
-    [self-hosting guide](https://langfuse.com/self-hosting/deployment/docker-compose).
+    Let's set up [Langfuse](https://langfuse.com), an open-source LLM observability platform with
+    native LangChain integration. We'll run it locally via ::logos:docker-icon:: Docker Compose.
     """)
     return
 
@@ -359,7 +396,7 @@ def _():
 def _():
     with mo.status.spinner(title="Starting Langfuse…"):
         subprocess.run(
-            ["docker", "compose", "up", "-d", "langfuse-web"],
+            ["docker", "compose", "up", "-d"],
             check=True,
         )
     _user = os.environ.get("LANGFUSE_INIT_USER_EMAIL", "")
@@ -378,12 +415,14 @@ def _():
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ### Tracing an agent invocation
+    ### Tracing
 
-    Integrating Langfuse into a LangChain agent requires a single change: pass a
-    `CallbackHandler` instance in the `config` dictionary when invoking the agent. The
-    callback intercepts every internal event — LLM calls, tool calls, chain starts and ends
-    — and streams them to Langfuse in real time, without any changes to the agent itself.
+    Integrating Langfuse into a LangChain agent requires a single change: pass a `CallbackHandler`
+    instance in the `config` dictionary when invoking the agent. The callback intercepts every
+    internal event — LLM calls, tool calls, chain starts and ends — and streams them to Langfuse
+    in real time, without any modification to the agent itself.
+
+    Let's run the same question as before and inspect the trace in the Langfuse UI.
     """)
     return
 
@@ -398,9 +437,19 @@ def _(Context, agent):
             config={"callbacks": [langfuse_handler]},
             context=Context(inbox=inbox, date=date),
         )
+
         return result["messages"][-1].content
 
-    return (ask_agent_traced,)
+    return ask_agent_traced, langfuse_handler
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Same question as before — this time with tracing enabled. After submitting, open the
+    Langfuse UI to see the full trace: each tool call, each LLM turn, and how long each step took.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -467,54 +516,32 @@ def _(ask_agent_traced, traced_agent_form):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ## 4 · Reinforcement Learning
+    ## 3 · Training
 
-    So far we have an agent that *works*, and an observability layer that lets us *see* what
-    it does. But how do we make the agent **better**?
+    We have a working agent and a platform to observe it. But how do we make it **better**?
 
-    **Reinforcement Learning (RL)** treats the problem as a loop:
+    **Reinforcement Learning (RL)** treats the problem as a loop: run the policy, score the
+    outcome with a reward signal, and update the weights to make high-reward trajectories more
+    likely. Repeat. Over many iterations, the model learns which search strategies lead to
+    correct answers.
 
-    | RL concept | Our agent |
-    |---|---|
-    | **Policy** | The LLM that decides which tool to call and what answer to give |
-    | **Environment** | The email database + the two tools (`search_emails`, `read_email`) |
-    | **Trajectory** | One complete agent run: the full sequence of messages from user question to final answer |
-    | **Reward** | A numeric score telling the policy how well it did on that trajectory |
+    The key design decision is the **reward function**. A naive binary reward — `+1` if the
+    final answer is correct, `0` otherwise — gives the model very little signal: it doesn't
+    know *why* it failed, or how close it got. Instead, let's use **reward shaping**: a rubric
+    that tracks intermediate signals during the trajectory and adds partial bonuses for
+    good intermediate behaviour, even when the final answer is wrong.
 
-    The RL training loop is simple in principle: run the policy many times, score each
-    trajectory, and update the policy weights to make high-reward trajectories more likely.
-
-    The critical piece is the **reward function** — it must capture not just whether the
-    final answer is correct, but also whether the agent *behaved well* along the way.
-
-    ### Reward shaping with a rubric
-
-    A naive reward — `+1` if correct, `0` otherwise — gives the model very little signal to
-    learn from. Instead we use a **rubric**: a structured scorecard that tracks intermediate
-    signals during the trajectory and feeds them into a shaped reward.
-
-    **Rubric fields:**
-
-    | Field | Type | What it tracks |
-    |---|---|---|
-    | `answer_correct` | bool | Whether the final answer matches the ground truth (evaluated by an LLM-as-judge) |
-    | `ever_found_right_email` | bool | Whether `search_emails` ever returned the target email among its results |
-    | `ever_read_right_email` | bool | Whether the agent called `read_email` with the correct `message_id` |
-    | `num_turns` | int | Total number of LLM calls in the trajectory |
-    | `num_tool_calls` | int | Total number of tool invocations |
-    | `error` | bool | Whether the agent raised an unhandled exception |
-
-    **Reward tiers** — the reward has three base levels, with additive partial bonuses
-    (+0.1 each) for process signals that indicate good intermediate behaviour:
+    ### Reward shaping
 
     | Outcome | Base | Partial bonuses | Range |
     |---|---|---|---|
-    | **Correct answer** | +1.0 | +0.1 found · +0.1 read · +0.1 efficiency | [1.0, 1.3] |
-    | **Wrong answer** | −1.0 | +0.1 found · +0.1 read | [−1.0, −0.8] |
-    | **No answer / error** | 0.0 | +0.1 found · +0.1 read | [0.0, 0.2] |
+    | **Correct answer** | +1.0 | found · read · efficiency | [1.0, 1.3] |
+    | **Wrong answer** | −1.0 | found · read | [−1.0, −0.8] |
+    | **No answer / error** | 0.0 | found · read | [0.0, 0.2] |
 
-    The efficiency bonus rewards trajectories that solve the task in fewer turns, nudging
-    the policy toward concise, targeted searches.
+    The *found* and *read* bonuses reward the agent for locating the right email even if it
+    ultimately gives a wrong answer. The *efficiency* bonus nudges it toward concise, targeted
+    searches rather than brute-force browsing.
     """)
     return
 
@@ -576,13 +603,15 @@ def _():
     mo.md(r"""
     ### Evaluation dataset
 
-    To compute rewards we need questions with known answers. The
-    [`corbt/enron_emails_sample_questions`](https://huggingface.co/datasets/corbt/enron_emails_sample_questions)
-    dataset on Hugging Face ::logos:hugging-face-icon:: provides synthetic queries over the Enron corpus, each paired
-    with a ground-truth answer and the `message_id`(s) of the relevant email(s).
+    To compute rewards we need questions with **known answers** — a ground-truth dataset to
+    measure the agent against.
 
-    Each `SyntheticQuery` carries its own `inbox_address` and `query_date`, so the agent's
-    context is set automatically for each evaluation run.
+    We'll use [`corbt/enron_emails_sample_questions`](https://huggingface.co/datasets/corbt/enron_emails_sample_questions)
+    from Hugging Face ::logos:hugging-face-icon::, a set of synthetic queries over the Enron corpus.
+    Each entry contains the question, the expected answer, the inbox address to search in, and
+    the `message_id`(s) of the relevant emails. This last field is especially useful: it lets us
+    check not just whether the final answer is correct, but whether the agent ever *found* the
+    right email during its search.
     """)
     return
 
@@ -615,10 +644,18 @@ def _(eval_queries):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ### Running a rollout
+    ### Rollout
 
-    A **rollout** is a single scored execution of the agent on a query: invoke the agent,
-    walk the message history to populate the rubric, and compute the shaped reward.
+    A **rollout** is a single scored execution of the agent on one query. Let's walk through
+    what happens:
+
+    1. Invoke the agent with the question and context.
+    2. Walk the resulting message history to populate the rubric — checking which tool calls
+       were made, whether the right email was found or read, and how many turns it took.
+    3. Use an LLM-as-judge to evaluate whether the final answer matches the ground truth.
+    4. Compute the shaped reward from the rubric.
+
+    Let's run a rollout on a query from the evaluation set and inspect the full result.
     """)
     return
 
@@ -630,6 +667,7 @@ def _(
     agent,
     calculate_reward,
     judge_answer_correctness,
+    langfuse_handler,
     model,
 ):
     def rollout(query, max_turns=10):
@@ -638,6 +676,7 @@ def _(
         try:
             result = agent.invoke(
                 {"messages": [("user", query.question)]},
+                config={"callbacks": [langfuse_handler]},
                 context=Context(inbox=query.inbox_address, date=query.query_date),
             )
             messages = result["messages"]
@@ -678,6 +717,15 @@ def _(
         return rubric, calculate_reward(rubric, max_turns), messages
 
     return (rollout,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Let's pick a query from the dataset and observe the full trajectory — the agent's
+    reasoning steps, the tools it called, and the final rubric breakdown with its reward.
+    """)
+    return
 
 
 @app.cell(hide_code=True)

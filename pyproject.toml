@@ -3,15 +3,16 @@ name = "scaling-ai-systems"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "marimo[recommended]>=0.20.4",
-    "langchain>=1.2.12", # TODO: langchain-core?
-    "langchain-openai>=1.1.11",
-    "datasets>=4.7.0",
+    "langchain>=1.0", # TODO: langchain-core?
+    "langchain-openai>=1.0",
+    "datasets",
     "sqlalchemy>=2.0",
-    "langfuse>=2.0",
+    "langfuse>=4.0",
     "python-dotenv",
+    "openpipe-art[backend,langgraph]>=0.4.9",
 ]
 
 [dependency-groups]
