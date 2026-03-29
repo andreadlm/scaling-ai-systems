@@ -263,7 +263,9 @@ def _():
         {message_id}
         """)
         .batch(
-            message_id=mo.ui.text(placeholder="<message_id>", label="Message ID")
+            message_id=mo.ui.text( # ty: ignore
+                placeholder="<message_id>", label="Message ID"
+            )
         )
         .form(show_clear_button=True, bordered=True)
     )
