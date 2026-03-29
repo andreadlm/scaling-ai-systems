@@ -3,6 +3,12 @@
 > 🎓 Companion notebook for the **"Scaling AI Systems" Part II** *Show Me How* session.  
 > Inspired by the [OpenPipe ART e-mail agent](https://openpipe.ai/blog/art-e-mail-agent) blog post.
 
+<div align="center">
+  <a href="https://molab.marimo.io/github/andreadlm/scaling-ai-systems/notebook.py" target="_blank">
+    <img src="https://marimo.io/molab-shield.svg" alt="Open in molab"/>
+  </a>
+</div>
+
 ## 🧭 What this is
 
 A step-by-step, interactive [Marimo](https://marimo.io) notebook that walks through the full lifecycle of a production-grade LLM agent: from a working prototype, through instrumented observability, to a model that improves itself via reinforcement learning.
