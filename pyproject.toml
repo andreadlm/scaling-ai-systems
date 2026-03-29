@@ -24,6 +24,3 @@ dev = [
 
 [tool.ty.environment]
 python = ".venv" # TODO: shouldn't be required
-
-[tool.ty.src]
-# exclude = ["notebook.py"] # Marimo lacks typing functionalities
