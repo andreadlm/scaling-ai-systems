@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.21.1"
-app = marimo.App(width="medium", app_title="Scaling AI systems")
+app = marimo.App(width="full", app_title="Scaling AI systems")
 
 with app.setup:
     import json
@@ -10,17 +10,27 @@ with app.setup:
     from dataclasses import asdict, dataclass
     import asyncio
 
-    import marimo as mo
     from dotenv import load_dotenv
+
+    import marimo as mo
+
+    # LangChain imports
     from langchain.agents import create_agent
     from langchain.agents.middleware import dynamic_prompt, ModelRequest
     from langchain_core.messages import AIMessage, ToolMessage
     from langchain_openai import ChatOpenAI
-    from langfuse.langchain import CallbackHandler
-    import art
-    from art.langgraph import init_chat_model
-    from art.local import LocalBackend
 
+    # Langfuse imports
+    from langfuse import get_client
+    from langfuse.langchain import CallbackHandler
+
+    # ART imports
+    import art
+    from art.langgraph import init_chat_model, wrap_rollout
+    from art.local import LocalBackend
+    from art.utils import iterate_dataset
+
+    # Local imports
     from agent.tools import search_emails, read_email
     from data.local_db import generate_database, sqlite_engine
     from data.types import SyntheticQuery
@@ -44,14 +54,39 @@ def _():
 
     The notebook is structured around three progressive steps:
 
-    1. **Agent** — define the environment (a real email corpus), give the agent tools to interact
-       with it, and wire everything together into a working LangChain agent.
-    2. **Observability** — instrument every agent run with [Langfuse](https://langfuse.com) to
+    1. **Agent** — define the environment, give the agent tools to interact with it, and wire
+       everything together into a working LangChain agent.
+    4. **Observability** — instrument every agent run with [Langfuse](https://langfuse.com) to
        capture full execution traces. Visibility into agent behaviour is a prerequisite for
        systematic improvement.
-    3. **Training** — score each run with a shaped reward rubric and feed those scores back to
+    5. **Training** — score each run with a shaped reward rubric and feed those scores back to
        the model via [OpenPipe ART](https://art.openpipe.ai) reinforcement learning, closing the
        loop from a working prototype to an improving policy.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.mermaid("""
+    flowchart LR
+        Q([🗣 Question]) --> Agent
+
+        subgraph one ["Agent"]
+            Agent["🤖 Agent\n(LangChain)"] <-->|tool calls / results| Tools["🔧 Tools\n\nsearch_emails\nread_email"]
+        end
+
+        Agent --> Ans([💬 Answer])
+
+        Agent -.->|execution trace| LF["📊 Langfuse\n(Observability)"]
+
+        subgraph three ["Training"]
+            Rubric["📋 Rubric\n(reward shaping)"] --> Reward(["🏆 reward"])
+            Reward --> ART["⚙️ OpenPipe ART\n(RL training)"]
+        end
+
+        Ans --> Rubric
+        ART -->|updated weights| Agent
     """)
     return
 
@@ -70,7 +105,7 @@ def _():
     for research, which makes it perfect for our purposes.
 
     Let's start by downloading a cleaned subset from Hugging Face and loading it into a local
-    ::devicon:sqlite:: SQLite database.
+    SQLite database.
     """)
     return
 
@@ -150,12 +185,30 @@ def _():
         {search_sent_after} {search_sent_before}
         """)
         .batch(
-            search_inbox=mo.ui.text(placeholder="user@enron.com", label="Inbox (required)"),
-            search_keywords=mo.ui.text(placeholder="budget forecast", label="Keywords (space-separated, required)"),
-            search_from_addr=mo.ui.text(placeholder="sender@enron.com", label="From (optional)"),
-            search_to_addr=mo.ui.text(placeholder="recipient@enron.com", label="To (optional)"),
-            search_sent_after=mo.ui.text(placeholder="2000-01-01", label="Sent after (optional)"),
-            search_sent_before=mo.ui.text(placeholder="2002-12-31", label="Sent before (optional)"),
+            search_inbox=mo.ui.text( # ty: ignore
+                placeholder="user@enron.com", 
+                label="Inbox (required)"
+            ),
+            search_keywords=mo.ui.text( # ty: ignore
+                placeholder="budget forecast", 
+                label="Keywords (space-separated, required)"
+            ),
+            search_from_addr=mo.ui.text( # ty: ignore
+                placeholder="sender@enron.com", 
+                label="From (optional)"
+            ),
+            search_to_addr=mo.ui.text( # ty: ignore
+                placeholder="recipient@enron.com", 
+                label="To (optional)"
+            ),
+            search_sent_after=mo.ui.text( # ty: ignore
+                placeholder="2000-01-01", 
+                label="Sent after (optional)"
+            ),
+            search_sent_before=mo.ui.text( # ty: ignore
+                placeholder="2002-12-31", 
+                label="Sent before (optional)"
+            ),
         )
         .form(show_clear_button=True, bordered=True)
     )
@@ -328,16 +381,16 @@ def _():
         {inbox} {date}
         """)
         .batch(
-            question=mo.ui.text(
+            question=mo.ui.text( #ty: ignore
                 placeholder="When is Shari's move to Portland targeted for?",
                 label="Question",
                 full_width=True,
             ),
-            inbox=mo.ui.text(
+            inbox=mo.ui.text( #ty: ignore
                 value="tim.belden@enron.com",
                 label="Inbox (your email address)",
             ),
-            date=mo.ui.date(
+            date=mo.ui.date( #ty: ignore
                 value="2000-12-30",
                 label="Date",
             ),
@@ -405,7 +458,7 @@ def _():
         mo.md(
             f"Langfuse is starting → open [http://localhost:3000](http://localhost:3000) to verify."
             f"\n\n**Username:** `{_user}`"
-            f"\n**Password:** `{_password}`"
+            f"\n\n**Password:** `{_password}`"
         ),
         kind="success",
     )
@@ -430,6 +483,7 @@ def _():
 @app.cell
 def _(Context, agent):
     langfuse_handler = CallbackHandler()
+    langfuse_client = get_client()
 
     def ask_agent_traced(question: str, inbox: str, date: str) -> str:
         result = agent.invoke(
@@ -440,7 +494,7 @@ def _(Context, agent):
 
         return result["messages"][-1].content
 
-    return ask_agent_traced, langfuse_handler
+    return ask_agent_traced, langfuse_client, langfuse_handler
 
 
 @app.cell(hide_code=True)
@@ -463,16 +517,16 @@ def _():
         {inbox} {date}
         """)
         .batch(
-            question=mo.ui.text(
+            question=mo.ui.text( #ty: ignore
                 placeholder="When is Shari's move to Portland targeted for?",
                 label="Question",
                 full_width=True,
             ),
-            inbox=mo.ui.text(
+            inbox=mo.ui.text( #ty: ignore
                 value="tim.belden@enron.com",
                 label="Inbox (your email address)",
             ),
-            date=mo.ui.date(
+            date=mo.ui.date( #ty: ignore
                 value="2000-12-30",
                 label="Date",
             ),
@@ -667,6 +721,7 @@ def _(
     agent,
     calculate_reward,
     judge_answer_correctness,
+    langfuse_client,
     langfuse_handler,
     model,
 ):
@@ -714,7 +769,17 @@ def _(
             # No textual answer means the agent ended with a tool call — treat as error.
             rubric.error = True
 
-        return rubric, calculate_reward(rubric, max_turns), messages
+        reward = calculate_reward(rubric, max_turns)
+
+        langfuse_client.create_score(
+            trace_id=langfuse_handler.last_trace_id,
+            name="reward",
+            value=reward,
+            data_type="NUMERIC",
+            comment=str(rubric.to_dict()),
+        )
+
+        return rubric, reward, messages
 
     return (rollout,)
 
@@ -739,7 +804,7 @@ def _(eval_queries):
         {query_selector}
         """)
         .batch(
-            query_selector=mo.ui.dropdown(
+            query_selector=mo.ui.dropdown( #ty: ignore
                 options=_query_options,
                 label="Query",
                 full_width=True,
@@ -779,6 +844,279 @@ def _(eval_queries, rollout, rollout_form):
             kind="success" if _reward >= 1.0 else ("warn" if _reward >= 0 else "danger"),
         ),
     ])
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### OpenPipe ART
+
+    Now let's close the loop. [OpenPipe ART](https://art.openpipe.ai) (Agent Reinforcement
+    Trainer) manages the full RL training loop: run batches of rollouts in parallel, collect
+    the shaped rewards, and perform policy gradient updates on the model weights.
+
+    Integrating ART requires one change to the rollout code: replace `ChatOpenAI` with
+    `init_chat_model` from `art.langgraph`. This wrapper intercepts every LLM call made during
+    the rollout and associates it with the current trajectory, giving ART the data it needs to
+    compute the gradient. Everything else — `create_agent`, `@dynamic_prompt`, `Context` —
+    stays exactly the same as in §1.
+    """)
+    return
+
+
+@app.cell
+async def _():
+    art_model = art.Model(
+        name=os.environ.get("ART_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct"),
+        project="scaling-ai-systems",
+    )
+    backend = LocalBackend()
+    await art_model.register(backend)
+
+    class ProjectTrajectory(art.Trajectory):
+        pass
+
+    return ProjectTrajectory, art_model
+
+
+@app.cell(hide_code=True)
+def _(
+    Context,
+    ProjectTrajectory,
+    Rubric,
+    build_prompt,
+    calculate_reward,
+    judge_answer_correctness,
+    langfuse_client,
+    langfuse_handler,
+    model,
+):
+    async def training_rollout(
+        art_model: art.Model, query: SyntheticQuery, max_turns: int = 10
+    ) -> ProjectTrajectory:
+        traj = ProjectTrajectory(
+            reward=0.0,
+            messages_and_choices=[],
+            metadata={"query_id": query.id},
+        )
+        rubric = Rubric()
+
+        try:
+            chat_model = init_chat_model(art_model.get_inference_name(), temperature=1.0)
+            training_agent = create_agent(
+                chat_model,
+                tools=[search_emails, read_email],
+                middleware=[build_prompt],
+                context_schema=Context,
+            )
+            result = await training_agent.ainvoke(
+                {"messages": [("user", query.question)]},
+                config={"callbacks": [langfuse_handler]},
+                context=Context(inbox=query.inbox_address, date=query.query_date),
+            )
+            messages = result["messages"]
+        except Exception:
+            rubric.error = True
+            traj.reward = calculate_reward(rubric, max_turns)
+            traj.metrics.update(rubric.to_dict())
+            return traj
+
+        correct_ids = set(query.message_ids)
+
+        for msg in messages:
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    rubric.num_tool_calls += 1
+                    if tc["name"] == "read_email":
+                        if tc["args"].get("message_id", "") in correct_ids:
+                            rubric.ever_read_right_email = True
+            elif isinstance(msg, ToolMessage) and msg.name == "search_emails":
+                try:
+                    results = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                    if isinstance(results, list):
+                        for r in results:
+                            if isinstance(r, dict) and r.get("message_id") in correct_ids:
+                                rubric.ever_found_right_email = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        rubric.num_turns = sum(1 for m in messages if isinstance(m, AIMessage))
+
+        final_ai = [m for m in messages if isinstance(m, AIMessage) and not m.tool_calls]
+        if final_ai:
+            rubric.answer_correct = await asyncio.to_thread(
+                judge_answer_correctness,
+                query.question,
+                final_ai[-1].content,
+                query.answer,
+                model,
+            )
+        else:
+            rubric.error = True
+
+        traj.reward = calculate_reward(rubric, max_turns)
+        traj.metrics.update(rubric.to_dict())
+
+        langfuse_client.create_score(
+            trace_id=langfuse_handler.last_trace_id,
+            name="reward",
+            value=traj.reward,
+            data_type="NUMERIC",
+            comment=str(rubric.to_dict()),
+        )
+
+        return traj
+
+    return (training_rollout,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Training loop
+
+    Everything is in place: a rollout function that scores each agent run, and an ART model
+    ready to receive weight updates. The training loop ties them together:
+
+    1. Split the training queries into batches (`groups per step` queries each).
+    2. For each query in the batch, run several rollouts (`rollouts per group`). These form a
+       *trajectory group* — ART compares them to see which strategies worked best.
+    3. `wrap_rollout` captures every LLM call inside each rollout for gradient computation.
+    4. Feed the scored trajectory groups to `model.train()` for a policy gradient update.
+
+    The configuration below defaults to a **quick demo run** — a small dataset slice and a
+    single epoch — so the loop completes in minutes and the training dynamics are easy to
+    observe. For a real training run, increase the dataset size and epochs.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    training_config_form = (
+        mo.md("""
+        **Training configuration**
+
+        {max_queries} {num_epochs}
+
+        {groups_per_step} {rollouts_per_group}
+
+        {learning_rate}
+        """)
+        .batch(
+            max_queries=mo.ui.number( # ty: ignore
+                value=20, start=5, stop=4000, step=5,
+                label="Training queries (dataset size)",
+            ),
+            num_epochs=mo.ui.number( #ty: ignore
+                value=1, start=1, stop=10, step=1,
+                label="Epochs",
+            ),
+            groups_per_step=mo.ui.number( #ty: ignore
+                value=4, start=1, stop=32, step=1,
+                label="Groups per step (queries per batch)",
+            ),
+            rollouts_per_group=mo.ui.number( #ty: ignore
+                value=2, start=1, stop=8, step=1,
+                label="Rollouts per group",
+            ),
+            learning_rate=mo.ui.number( #ty: ignore
+                value=1e-5, start=1e-6, stop=1e-3, step=1e-6,
+                label="Learning rate",
+            ),
+        )
+        .form(
+            submit_button_label="Start training",
+            show_clear_button=True,
+            bordered=True,
+        )
+    )
+    training_config_form
+    return (training_config_form,)
+
+
+@app.cell
+async def _(art_model, training_config_form, training_rollout):
+    mo.stop(
+        training_config_form.value is None,
+        mo.md("_Configure the parameters above and click **Start training**._"),
+    )
+
+    _cfg = training_config_form.value
+
+    with mo.status.spinner(title="Loading training queries…"):
+        _train_queries = load_synthetic_queries(
+            split="train",
+            limit=_cfg["max_queries"],
+            shuffle=True,
+        )
+
+    _total_steps = -(-len(_train_queries) // _cfg["groups_per_step"]) * _cfg["num_epochs"]
+    _total_rollouts = len(_train_queries) * _cfg["rollouts_per_group"] * _cfg["num_epochs"]
+
+    mo.output.append(
+        mo.callout(
+            mo.md(
+                f"Training started — **{len(_train_queries)}** queries × "
+                f"**{_cfg['num_epochs']}** epoch(s) = "
+                f"~**{_total_steps}** steps, ~**{_total_rollouts}** rollouts"
+            ),
+            kind="info",
+        )
+    )
+
+    _train_iterator = iterate_dataset(
+        _train_queries,
+        groups_per_step=_cfg["groups_per_step"],
+        num_epochs=_cfg["num_epochs"],
+        initial_step=await art_model.get_step(),
+    )
+
+    for _batch in _train_iterator:
+        mo.output.append(
+            mo.md(f"**Step {_batch.step}** · epoch {_batch.epoch} · {len(_batch.items)} queries")
+        )
+
+        _groups = await art.gather_trajectory_groups(
+            [
+                art.TrajectoryGroup([
+                    wrap_rollout(art_model, training_rollout)(
+                        art_model, _query
+                    )
+                    for _ in range(_cfg["rollouts_per_group"])
+                ])
+                for _query in _batch.items
+            ],
+            pbar_desc=f"step {_batch.step}",
+            max_exceptions=_cfg["rollouts_per_group"] * len(_batch.items),
+        )
+
+        _n_trajs = sum(len(g.trajectories) for g in _groups)
+        _avg_reward = (
+            sum(t.reward for g in _groups for t in g.trajectories) / _n_trajs
+            if _n_trajs > 0 else 0.0
+        )
+
+        mo.output.append(
+            mo.callout(
+                mo.md(
+                    f"Step {_batch.step} complete — "
+                    f"{_n_trajs} trajectories, "
+                    f"avg reward: **{_avg_reward:.3f}**"
+                ),
+                kind="success" if _avg_reward > 0 else "warn",
+            )
+        )
+
+        await art_model.train(
+            _groups,
+            config=art.TrainConfig(learning_rate=_cfg["learning_rate"]),
+        )
+
+    mo.output.append(
+        mo.callout(mo.md("Training complete."), kind="success")
+    )
     return
 
 
