@@ -716,7 +716,7 @@ def _():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     Context,
     Rubric,
@@ -852,6 +852,112 @@ def _(eval_queries, rollout, rollout_form):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
+    ### Trajectory anatomy
+
+    Each rollout produces a `ProjectTrajectory` — the data structure ART needs for training.
+    It has four fields:
+
+    | Field | Contents |
+    |---|---|
+    | `messages_and_choices` | The full sequence of agent messages (system, user, assistant, tool) |
+    | `reward` | Scalar reward from the rubric — the training signal |
+    | `metrics` | Individual rubric signals as a dictionary (for logging) |
+    | `metadata` | Episode identifiers (`query_id`, `step`) |
+
+    Run a rollout with the live model below to see exactly how a real execution maps to this structure.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(eval_queries):
+    _query_options = {f"[{q.id}] {q.question[:80]}": i for i, q in enumerate(eval_queries)}
+
+    trajectory_form = (
+        mo.md("""
+        **Run a rollout and inspect its trajectory**
+
+        {query_selector}
+        """)
+        .batch(
+            query_selector=mo.ui.dropdown( # ty: ignore
+                options=_query_options,
+                label="Query",
+                full_width=True,
+            ),
+        )
+        .form(show_clear_button=True, bordered=True)
+    )
+    trajectory_form
+    return (trajectory_form,)
+
+
+@app.cell(hide_code=True)
+def _(ProjectTrajectory, eval_queries, rollout, trajectory_form):
+    mo.stop(
+        trajectory_form.value is None or trajectory_form.value["query_selector"] is None,
+        mo.md("_Select a query and submit to inspect the trajectory._"),
+    )
+
+    _idx = trajectory_form.value["query_selector"]
+    _query = eval_queries[_idx]
+
+    with mo.status.spinner(title="Running rollout…"):
+        _rubric, _reward, _messages = rollout(_query)
+
+    # Build a ProjectTrajectory preview from this rollout
+    _messages_and_choices = [
+        {"role": m.type, "content": m.content[:120] + "…" if len(m.content) > 120 else m.content}
+        for m in _messages
+        if hasattr(m, "content") and m.content
+    ]
+
+    _traj_preview = ProjectTrajectory(
+        reward=_reward,
+        messages_and_choices=[],
+        metadata={"query_id": _query.id, "step": 0},
+    )
+    _traj_preview.metrics.update(_rubric.to_dict())
+
+    mo.vstack([
+        mo.md(f"**Query:** {_query.question}"),
+        mo.md("---"),
+        mo.md("#### `messages_and_choices` — the agent's message sequence"),
+        mo.ui.table(
+            _messages_and_choices,
+            label=f"{len(_messages_and_choices)} messages",
+        ),
+        mo.md("#### `reward` + `metrics` — the training signal"),
+        mo.hstack([
+            mo.callout(
+                mo.md(f"**`reward = {_reward:.3f}`**"),
+                kind="success" if _reward >= 1.0 else ("warn" if _reward >= 0 else "danger"),
+            ),
+            mo.ui.table(
+                [{"rubric field": k, "value": v} for k, v in _rubric.to_dict().items()],
+                label="metrics",
+            ),
+        ]),
+        mo.md("#### `metadata` — episode identifiers"),
+        mo.ui.table(
+            [{"field": k, "value": v} for k, v in _traj_preview.metadata.items()],
+            label="metadata",
+        ),
+        mo.callout(
+            mo.md(
+                "During training, `training_rollout()` produces this same structure. "
+                "`wrap_rollout()` then attaches the ART model's log-probabilities to it — "
+                "the raw data needed to compute the policy gradient."
+            ),
+            kind="info",
+        ),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
     ### OpenPipe ART
 
     Now let's close the loop. [OpenPipe ART](https://art.openpipe.ai) (Agent Reinforcement
@@ -869,9 +975,10 @@ def _():
 
 @app.cell
 async def _():
-    art_model = art.Model(
-        name=os.environ.get("ART_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct"),
+    art_model = art.TrainableModel(
+        name="email-agent-001",
         project="scaling-ai-systems",
+        base_model=os.environ.get("ART_BASE_MODEL", "Qwen/Qwen2.5-7B-Instruct"),
     )
     backend = LocalBackend()
     await art_model.register(backend)
@@ -894,13 +1001,22 @@ def _(
     langfuse_handler,
     model,
 ):
+    from pydantic import BaseModel as _BaseModel
+
+    class TrainingInput(_BaseModel):
+        step: int
+        query: SyntheticQuery
+
+    MAX_TURNS = 10
+
     async def training_rollout(
-        art_model: art.Model, query: SyntheticQuery, max_turns: int = 10
+        art_model: art.TrainableModel, training_input: TrainingInput
     ) -> ProjectTrajectory:
+        query = training_input.query
         traj = ProjectTrajectory(
             reward=0.0,
             messages_and_choices=[],
-            metadata={"query_id": query.id},
+            metadata={"query_id": query.id, "step": training_input.step},
         )
         rubric = Rubric()
 
@@ -920,7 +1036,7 @@ def _(
             messages = result["messages"]
         except Exception:
             rubric.error = True
-            traj.reward = calculate_reward(rubric, max_turns)
+            traj.reward = calculate_reward(rubric, MAX_TURNS)
             traj.metrics.update(rubric.to_dict())
             return traj
 
@@ -957,7 +1073,7 @@ def _(
         else:
             rubric.error = True
 
-        traj.reward = calculate_reward(rubric, max_turns)
+        traj.reward = calculate_reward(rubric, MAX_TURNS)
         traj.metrics.update(rubric.to_dict())
 
         langfuse_client.create_score(
@@ -970,7 +1086,7 @@ def _(
 
         return traj
 
-    return (training_rollout,)
+    return MAX_TURNS, TrainingInput, training_rollout
 
 
 @app.cell(hide_code=True)
@@ -990,6 +1106,23 @@ def _():
     The configuration below defaults to a **quick demo run** — a small dataset slice and a
     single epoch — so the loop completes in minutes and the training dynamics are easy to
     observe. For a real training run, increase the dataset size and epochs.
+
+    #### Parameter guide
+
+    | Parameter | Controls | Typical values |
+    |---|---|---|
+    | **Training queries** | How many distinct queries to use from the dataset. | 50–4000 |
+    | **Epochs** | How many full passes over the dataset. | 1–5 |
+    | **Groups per step** | How many queries per training batch. | 2–8 |
+    | **Rollouts per group** | How many agents solve the *same* query in parallel, at `temperature=1.0`. | 2–8 |
+    | **Learning rate** | How aggressively to update the weights. | 1e-5 |
+
+    > **Why multiple rollouts per group?**
+    >
+    > ART uses **GRPO** (Group Relative Policy Optimisation): rewards are *normalised within
+    > the group*, not scored in isolation. With only one rollout per group the gradient signal
+    > is zero — there is nothing to compare against. With several, the model learns which
+    > search strategy worked best for each query and up-weights it.
     """)
     return
 
@@ -1039,7 +1172,7 @@ def _():
 
 
 @app.cell
-async def _(art_model, training_config_form, training_rollout):
+async def _(TrainingInput, art_model, training_config_form, training_rollout):
     mo.stop(
         training_config_form.value is None,
         mo.md("_Configure the parameters above and click **Start training**._"),
@@ -1082,12 +1215,12 @@ async def _(art_model, training_config_form, training_rollout):
 
         _groups = await art.gather_trajectory_groups(
             [
-                art.TrajectoryGroup([
+                art.TrajectoryGroup(
                     wrap_rollout(art_model, training_rollout)(
-                        art_model, _query
+                        art_model, TrainingInput(step=_batch.step, query=_query)
                     )
                     for _ in range(_cfg["rollouts_per_group"])
-                ])
+                )
                 for _query in _batch.items
             ],
             pbar_desc=f"step {_batch.step}",
@@ -1111,6 +1244,7 @@ async def _(art_model, training_config_form, training_rollout):
             )
         )
 
+        await art_model.delete_checkpoints()
         await art_model.train(
             _groups,
             config=art.TrainConfig(learning_rate=_cfg["learning_rate"]),
