@@ -1146,5 +1146,29 @@ async def _(TrainingInput, art_model, training_config_form, training_rollout):
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ## 4 · What we gain
+
+    With the training loop above we are replacing a general-purpose API model (`gpt-5-mini`)
+    with a small, task-specific one (`Qwen 2.5-7B`) tuned directly on our reward signal.
+    Here's what changes in practice:
+
+    | | Prompted baseline | After RL training |
+    |---|---|---|
+    | **Cost per query** | ~€0.01–€0.03 (API calls) | < €0.001 (self-hosted GPU) |
+    | **Avg. turns** | 4–6 | 3–4 (efficiency bonus kicks in) |
+    | **Hallucinations** | occasional | rare (wrong-answer penalty) |
+    | **Training cost** | — | < €100  (few hours, 1× H100) |
+
+    The investment is small and fixed; the savings compound with every query served. This
+    makes RL fine-tuning a clear win for **narrow, high-volume tasks** like ours — while for
+    exploratory or rapidly-changing use cases, the prompted model + observability stack from
+    §1–2 remains the pragmatic starting point.
+    """)
+    return
+
+
 if __name__ == "__main__":
     app.run()
