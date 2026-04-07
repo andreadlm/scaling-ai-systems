@@ -39,7 +39,7 @@ def search_emails(
     sent_after: Optional[str] = None,
     sent_before: Optional[str] = None,
     max_results: int = 10,
-) -> List[SearchResult]:
+) -> List[dict]:
     """
     Searches the email database based on keywords, inbox, sender, recipient, and date range.
 
@@ -148,7 +148,7 @@ def search_emails(
 
     # Format results
     formatted_results = [
-        SearchResult(message_id=row[0], snippet=row[1]) for row in results
+        {"message_id": row[0], "snippet": row[1]} for row in results
     ]
     logging.info(f"Search found {len(formatted_results)} results.")
     return formatted_results
