@@ -235,7 +235,7 @@ def _(search_emails_form):
     })
 
     mo.ui.table(
-        [{"message_id": r.message_id, "snippet": mo.Html(r.snippet)} for r in _results],
+        [{"message_id": r["message_id"], "snippet": mo.Html(r["snippet"])} for r in _results],
         label=f"{len(_results)} result(s)",
     )
     return
@@ -351,11 +351,11 @@ def _(Context, model):
 
 
 @app.cell
-def _(Context, agent):
+def _(agent):
     def ask_agent(question: str, inbox: str, date: str) -> str:
         result = agent.invoke(
             {"messages": [("user", question)]},
-            context=Context(inbox=inbox, date=date),
+            config={"recursion_limit": 21},
         )
         return result["messages"][-1].content
 
@@ -490,7 +490,7 @@ def _(Context, agent):
     def ask_agent_traced(question: str, inbox: str, date: str) -> str:
         result = agent.invoke(
             {"messages": [("user", question)]},
-            config={"callbacks": [langfuse_handler]},
+            config={"callbacks": [langfuse_handler], "recursion_limit": 21},
             context=Context(inbox=inbox, date=date),
         )
 
@@ -716,7 +716,7 @@ def _():
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     Context,
     Rubric,
@@ -733,7 +733,7 @@ def _(
         try:
             result = agent.invoke(
                 {"messages": [("user", query.question)]},
-                config={"callbacks": [langfuse_handler]},
+                config={"callbacks": [langfuse_handler], "recursion_limit": max_turns * 2 + 1},
                 context=Context(inbox=query.inbox_address, date=query.query_date),
             )
             messages = result["messages"]
@@ -789,8 +789,8 @@ def _(
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    Let's pick a query from the dataset and observe the full trajectory — the agent's
-    reasoning steps, the tools it called, and the final rubric breakdown with its reward.
+    Let's pick a query from the dataset and run a rollout — scoring the agent's answer
+    against the ground truth and computing the shaped reward.
     """)
     return
 
@@ -844,112 +844,6 @@ def _(eval_queries, rollout, rollout_form):
         mo.callout(
             mo.md(f"**Reward: `{_reward:.2f}`**"),
             kind="success" if _reward >= 1.0 else ("warn" if _reward >= 0 else "danger"),
-        ),
-    ])
-    return
-
-
-@app.cell(hide_code=True)
-def _():
-    mo.md(r"""
-    ### Trajectory anatomy
-
-    Each rollout produces a `ProjectTrajectory` — the data structure ART needs for training.
-    It has four fields:
-
-    | Field | Contents |
-    |---|---|
-    | `messages_and_choices` | The full sequence of agent messages (system, user, assistant, tool) |
-    | `reward` | Scalar reward from the rubric — the training signal |
-    | `metrics` | Individual rubric signals as a dictionary (for logging) |
-    | `metadata` | Episode identifiers (`query_id`, `step`) |
-
-    Run a rollout with the live model below to see exactly how a real execution maps to this structure.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(eval_queries):
-    _query_options = {f"[{q.id}] {q.question[:80]}": i for i, q in enumerate(eval_queries)}
-
-    trajectory_form = (
-        mo.md("""
-        **Run a rollout and inspect its trajectory**
-
-        {query_selector}
-        """)
-        .batch(
-            query_selector=mo.ui.dropdown( # ty: ignore
-                options=_query_options,
-                label="Query",
-                full_width=True,
-            ),
-        )
-        .form(show_clear_button=True, bordered=True)
-    )
-    trajectory_form
-    return (trajectory_form,)
-
-
-@app.cell(hide_code=True)
-def _(ProjectTrajectory, eval_queries, rollout, trajectory_form):
-    mo.stop(
-        trajectory_form.value is None or trajectory_form.value["query_selector"] is None,
-        mo.md("_Select a query and submit to inspect the trajectory._"),
-    )
-
-    _idx = trajectory_form.value["query_selector"]
-    _query = eval_queries[_idx]
-
-    with mo.status.spinner(title="Running rollout…"):
-        _rubric, _reward, _messages = rollout(_query)
-
-    # Build a ProjectTrajectory preview from this rollout
-    _messages_and_choices = [
-        {"role": m.type, "content": m.content[:120] + "…" if len(m.content) > 120 else m.content}
-        for m in _messages
-        if hasattr(m, "content") and m.content
-    ]
-
-    _traj_preview = ProjectTrajectory(
-        reward=_reward,
-        messages_and_choices=[],
-        metadata={"query_id": _query.id, "step": 0},
-    )
-    _traj_preview.metrics.update(_rubric.to_dict())
-
-    mo.vstack([
-        mo.md(f"**Query:** {_query.question}"),
-        mo.md("---"),
-        mo.md("#### `messages_and_choices` — the agent's message sequence"),
-        mo.ui.table(
-            _messages_and_choices,
-            label=f"{len(_messages_and_choices)} messages",
-        ),
-        mo.md("#### `reward` + `metrics` — the training signal"),
-        mo.hstack([
-            mo.callout(
-                mo.md(f"**`reward = {_reward:.3f}`**"),
-                kind="success" if _reward >= 1.0 else ("warn" if _reward >= 0 else "danger"),
-            ),
-            mo.ui.table(
-                [{"rubric field": k, "value": v} for k, v in _rubric.to_dict().items()],
-                label="metrics",
-            ),
-        ]),
-        mo.md("#### `metadata` — episode identifiers"),
-        mo.ui.table(
-            [{"field": k, "value": v} for k, v in _traj_preview.metadata.items()],
-            label="metadata",
-        ),
-        mo.callout(
-            mo.md(
-                "During training, `training_rollout()` produces this same structure. "
-                "`wrap_rollout()` then attaches the ART model's log-probabilities to it — "
-                "the raw data needed to compute the policy gradient."
-            ),
-            kind="info",
         ),
     ])
     return
@@ -1030,7 +924,7 @@ def _(
             )
             result = await training_agent.ainvoke(
                 {"messages": [("user", query.question)]},
-                config={"callbacks": [langfuse_handler]},
+                config={"callbacks": [langfuse_handler], "recursion_limit": MAX_TURNS * 2 + 1},
                 context=Context(inbox=query.inbox_address, date=query.query_date),
             )
             messages = result["messages"]
@@ -1086,7 +980,7 @@ def _(
 
         return traj
 
-    return MAX_TURNS, TrainingInput, training_rollout
+    return TrainingInput, training_rollout
 
 
 @app.cell(hide_code=True)
@@ -1102,10 +996,6 @@ def _():
        *trajectory group* — ART compares them to see which strategies worked best.
     3. `wrap_rollout` captures every LLM call inside each rollout for gradient computation.
     4. Feed the scored trajectory groups to `model.train()` for a policy gradient update.
-
-    The configuration below defaults to a **quick demo run** — a small dataset slice and a
-    single epoch — so the loop completes in minutes and the training dynamics are easy to
-    observe. For a real training run, increase the dataset size and epochs.
 
     #### Parameter guide
 
@@ -1141,11 +1031,11 @@ def _():
         """)
         .batch(
             max_queries=mo.ui.number( # ty: ignore
-                value=20, start=5, stop=4000, step=5,
+                value=500, start=5, stop=4000, step=5,
                 label="Training queries (dataset size)",
             ),
             num_epochs=mo.ui.number( #ty: ignore
-                value=1, start=1, stop=10, step=1,
+                value=3, start=1, stop=10, step=1,
                 label="Epochs",
             ),
             groups_per_step=mo.ui.number( #ty: ignore
@@ -1153,7 +1043,7 @@ def _():
                 label="Groups per step (queries per batch)",
             ),
             rollouts_per_group=mo.ui.number( #ty: ignore
-                value=2, start=1, stop=8, step=1,
+                value=4, start=1, stop=8, step=1,
                 label="Rollouts per group",
             ),
             learning_rate=mo.ui.number( #ty: ignore
