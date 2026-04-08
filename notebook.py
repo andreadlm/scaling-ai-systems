@@ -351,11 +351,12 @@ def _(Context, model):
 
 
 @app.cell
-def _(agent):
+def _(Context, agent):
     def ask_agent(question: str, inbox: str, date: str) -> str:
         result = agent.invoke(
             {"messages": [("user", question)]},
             config={"recursion_limit": 21},
+            context=Context(inbox=inbox, date=date),
         )
         return result["messages"][-1].content
 
